@@ -7,6 +7,7 @@
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <filesystem>
 #include <fftw3.h>
 #include <fpng.h>
 
@@ -70,20 +71,22 @@ struct pfc_parms
 // define a structure for pfc model checkpoint
 struct pfc_checkpoint
 {
-    int n;                     // time step
-    double t;                  // time
-    double dt;                 // time step
-    double *psi_1D;            // density
-    double *phi2_1D;           // density^2
-    fftw_complex *psiq_1D;     // density in Fourier space
-    fftw_complex *d2nq_1D;     // second derivative of density in q space
-    array<double, LY * LX> f;  // free energy
-    array<double, LY * LX> mu; // chemical energy
-    double fMean;
-    double muMean;
-    array<double, LX> qx;
-    array<double, LY / 2 + 1> qy;
-    array<array<double, LX>, LY / 2 + 1> q2, exp_1, cf_1, cf2_1;
+    int n;                          // time step
+    double t;                       // time
+    double dt;                      // time step
+    vector<double> psi, psi2;       // density, density^2
+    vector<array<double, 2>> psi_q; // density in Fourier space
+    vector<array<double, 2>> d2n_q; // second derivative of density in q space
+    vector<double> f;               // free energy
+    vector<double> mu;              // chemical energy
+    double fMean;                   // mean free energy
+    double muMean;                  // mean chemical energy
+    vector<double> qx;
+    vector<double> qy;
+    vector<double> q2;
+    vector<double> exp_1;
+    vector<double> cf_1;
+    vector<double> cf2_1;
     fftw_plan r2c;
     fftw_plan c2r;
     int nimages; // number of images
@@ -92,21 +95,32 @@ struct pfc_checkpoint
 // define a structure for pfc temps (temporary variables)
 struct pfc_temps
 {
-    array<double, LY * LX> nonlin1;
-    array<fftw_complex, (LY / 2 + 1) * LX> nonlin1_q;
+    vector<double> nonlin1;
+    vector<array<double, 2>> nonlin1_q;
 };
 
 // prototypes
+// tests
 void test_pfc_2D();
+
+// PFC initialization / cleanup
 void init_pfc_parms_thin_film(pfc_parms &parms);
 void output_pfc_parms(pfc_parms &parms);
 void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint);
 void output_pfc_checkpoint(pfc_checkpoint &checkpoint);
 void free_pfc_checkpoint(pfc_checkpoint &checkpoint);
-void psi2png(int l, int m, double *psi, string name);
+void init_pfc_temps(pfc_temps &temps);
+
+// PFC algorithms
 void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint);
 void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps);
 
+// File outputs
+void delete_files();
+void write_f_mu(pfc_checkpoint &checkpoint);
+void psi2png(int l, int m, double *psi, string name);
+
+// main
 int main(int argc, char const *argv[])
 {
     cout << "Hello World!" << endl;
@@ -121,6 +135,8 @@ int main(int argc, char const *argv[])
 // tests
 void test_pfc_2D()
 {
+    // delete files
+    delete_files();
 
 #ifdef NOISE_DYNAMICS
     complex **zeta_nq; // 2D Gaussian noise
@@ -134,14 +150,16 @@ void test_pfc_2D()
     pfc_checkpoint checkpoint;
     init_pfc_checkpoint(parms, checkpoint);
     output_pfc_checkpoint(checkpoint);
-    psi2png(LY, LX, checkpoint.psi_1D, "test.png");
+
+    psi2png(LY, LX, checkpoint.psi.data(), "test.png");
     f_mu(parms, checkpoint);
 
-    // output checkpoint.fMean, checkpoint.muMean
-    cout << "<f>: " << checkpoint.fMean << ", <mu>: " << checkpoint.muMean << endl;
+    // write fMean, muMean to file
+    write_f_mu(checkpoint);
 
     // initialize temps
     pfc_temps temps;
+    init_pfc_temps(temps);
 
     // calculate non linear term
     nonlin1_calc(parms, checkpoint, temps);
@@ -149,6 +167,7 @@ void test_pfc_2D()
     free_pfc_checkpoint(checkpoint);
 }
 
+// PFC initialization / cleanup
 void init_pfc_parms_thin_film(pfc_parms &parms)
 {
     parms.q0 = 1;
@@ -212,14 +231,22 @@ void output_pfc_parms(pfc_parms &parms)
 
 void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
 {
-    checkpoint.psi_1D = fftw_alloc_real(LY * LX);
-    checkpoint.phi2_1D = fftw_alloc_real(LY * LX);
-    checkpoint.psiq_1D = fftw_alloc_complex((LY / 2 + 1) * LX);
-    checkpoint.d2nq_1D = fftw_alloc_complex((LY / 2 + 1) * LX);
+    checkpoint.psi.resize(LY * LX);
+    checkpoint.psi2.resize(LY * LX);
+    checkpoint.psi_q.resize((LY / 2 + 1) * LX);
+    checkpoint.d2n_q.resize((LY / 2 + 1) * LX);
+    checkpoint.f.resize(LY * LX);
+    checkpoint.mu.resize(LY * LX);
+    checkpoint.qx.resize(LX);
+    checkpoint.qy.resize(LY / 2 + 1);
+    checkpoint.q2.resize((LY / 2 + 1) * LX);
+    checkpoint.exp_1.resize((LY / 2 + 1) * LX);
+    checkpoint.cf_1.resize((LY / 2 + 1) * LX);
+    checkpoint.cf2_1.resize((LY / 2 + 1) * LX);
 
     // Create the FFTW plan
-    checkpoint.r2c = fftw_plan_dft_r2c_2d(LY, LX, checkpoint.psi_1D, checkpoint.psiq_1D, FFTW_MEASURE);
-    checkpoint.c2r = fftw_plan_dft_c2r_2d(LY, LX, checkpoint.psiq_1D, checkpoint.psi_1D, FFTW_MEASURE);
+    checkpoint.r2c = fftw_plan_dft_r2c_2d(LY, LX, checkpoint.psi.data(), reinterpret_cast<fftw_complex *>(checkpoint.psi_q.data()), FFTW_MEASURE);
+    checkpoint.c2r = fftw_plan_dft_c2r_2d(LY, LX, reinterpret_cast<fftw_complex *>(checkpoint.psi_q.data()), checkpoint.psi.data(), FFTW_MEASURE);
 
     checkpoint.n = 0;
     checkpoint.t = 0.0;
@@ -228,10 +255,6 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
     // random number test
     srand(parms.seed); // randomimze from seed
     cout << "random double [between 0 and 1] = " << (double)rand() / RAND_MAX << endl;
-
-    // Create a vector representations of psi and psiq
-    // vector<double> psi(checkpoint.psi_1D, checkpoint.psi_1D + LY * LX);
-    // vector<double> psiq(reinterpret_cast<double *>(checkpoint.psiq_1D), reinterpret_cast<double *>(checkpoint.psiq_1D) + LY * (LX / 2 + 1) * 2);
 
     // initialize psi with noise
     double n0 = -0.02; // n0_sol=-0.042253274 (from 1D ampl. eqs.); note: if setting n0=-0.04, all liquid
@@ -243,28 +266,28 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
         {
             if (abs(n0) < 1.0e-10)
             {
-                // psi[j][i] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
-                checkpoint.psi_1D[j * LX + i] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
+                // psi[index] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
+                checkpoint.psi[j * LX + i] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
             }
             else
             {
-                // psi[j][i] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
-                checkpoint.psi_1D[j * LX + i] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
+                // psi[index] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
+                checkpoint.psi[j * LX + i] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
             }
         }
     }
 
     // get initial psiq
     fftw_execute(checkpoint.r2c);
-    checkpoint.psiq_1D[0][0] = n0 * LX * LY; // set the zero mode to n0 so that <psi>=n0
-    checkpoint.psiq_1D[0][1] = 0.0;
+    checkpoint.psi_q[0][0] = n0 * LX * LY; // set the zero mode to n0 so that <psi>=n0
+    checkpoint.psi_q[0][1] = 0.0;
     fftw_execute(checkpoint.c2r);
     for (int j = 0; j < LY; j++)
     {
         for (int i = 0; i < LX; i++)
         {
-            // psi[j][i] *= scale;
-            checkpoint.psi_1D[j * LX + i] *= parms.scale;
+            // psi[index] *= scale;
+            checkpoint.psi[j * LX + i] *= parms.scale;
         }
     }
 
@@ -293,23 +316,24 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
     }
 
     // build q2, exp_1, cf_1, cf2_1
-    for (int i = 0; i < LX; i++)
+    for (int j = 0; j < LY / 2 + 1; j++)
     {
-        for (int j = 0; j < LY / 2 + 1; j++)
+        for (int i = 0; i < LX; i++)
         {
-            checkpoint.q2[j][i] = checkpoint.qx[i] * checkpoint.qx[i] + checkpoint.qy[j] * checkpoint.qy[j];
-            auto alpha_1 = -checkpoint.q2[j][i] * (-parms.eps + (checkpoint.q2[j][i] - parms.q02) * (checkpoint.q2[j][i] - parms.q02));
+            auto index = j * LX + i;
+            checkpoint.q2[index] = checkpoint.qx[i] * checkpoint.qx[i] + checkpoint.qy[j] * checkpoint.qy[j];
+            auto alpha_1 = -checkpoint.q2[index] * (-parms.eps + (checkpoint.q2[index] - parms.q02) * (checkpoint.q2[index] - parms.q02));
             auto alpha_dt = alpha_1 * checkpoint.dt;
-            checkpoint.exp_1[j][i] = exp(alpha_dt);
+            checkpoint.exp_1[index] = exp(alpha_dt);
             if (abs(alpha_dt) < 2.0e-5)
             {
-                checkpoint.cf_1[j][i] = checkpoint.dt * (1.0 + 0.5 * alpha_dt * (1.0 + alpha_dt / 3.0));
-                checkpoint.cf2_1[j][i] = 0.5 * checkpoint.dt * (1.0 + alpha_dt * (1.0 + 0.250 * alpha_dt) / 3.0);
+                checkpoint.cf_1[index] = checkpoint.dt * (1.0 + 0.5 * alpha_dt * (1.0 + alpha_dt / 3.0));
+                checkpoint.cf2_1[index] = 0.5 * checkpoint.dt * (1.0 + alpha_dt * (1.0 + 0.250 * alpha_dt) / 3.0);
             }
             else
             {
-                checkpoint.cf_1[j][i] = (checkpoint.exp_1[j][i] - 1) / alpha_1;
-                checkpoint.cf2_1[j][i] = (checkpoint.exp_1[j][i] - (1 + alpha_dt)) / (alpha_1 * alpha_dt);
+                checkpoint.cf_1[index] = (checkpoint.exp_1[index] - 1) / alpha_1;
+                checkpoint.cf2_1[index] = (checkpoint.exp_1[index] - (1 + alpha_dt)) / (alpha_1 * alpha_dt);
             }
         }
     }
@@ -326,10 +350,11 @@ void output_pfc_checkpoint(pfc_checkpoint &checkpoint)
     {
         for (int i = 0; i < LX; i++)
         {
-            out_q2 << checkpoint.q2[j][i] << ",";
-            out_exp_1 << checkpoint.exp_1[j][i] << ",";
-            out_cf_1 << checkpoint.cf_1[j][i] << ",";
-            out_cf2_1 << checkpoint.cf2_1[j][i] << ",";
+            auto index = j * LX + i;
+            out_q2 << checkpoint.q2[index] << ",";
+            out_exp_1 << checkpoint.exp_1[index] << ",";
+            out_cf_1 << checkpoint.cf_1[index] << ",";
+            out_cf2_1 << checkpoint.cf2_1[index] << ",";
         }
         out_q2 << endl;
         out_exp_1 << endl;
@@ -344,14 +369,90 @@ void output_pfc_checkpoint(pfc_checkpoint &checkpoint)
 
 void free_pfc_checkpoint(pfc_checkpoint &checkpoint)
 {
-    fftw_free(checkpoint.psi_1D);
-    fftw_free(checkpoint.phi2_1D);
-    fftw_free(checkpoint.psiq_1D);
-    fftw_free(checkpoint.d2nq_1D);
-
     // destroy the plans
     fftw_destroy_plan(checkpoint.r2c);
     fftw_destroy_plan(checkpoint.c2r);
+}
+
+void init_pfc_temps(pfc_temps &temps)
+{
+    temps.nonlin1.resize(LY * LX);
+    temps.nonlin1_q.resize((LY / 2 + 1) * LX);
+}
+
+// PFC algorithms
+void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
+{
+    for (int j = 0; j < LY; j++)
+    {
+        for (int i = 0; i < LX; i++)
+        {
+            auto index = j * LX + i;
+            checkpoint.psi2[index] = checkpoint.psi[index] * checkpoint.psi[index];
+            checkpoint.f[index] = (0.25 * checkpoint.psi2[index] - 0.5 * parms.eps - parms.g * checkpoint.psi[index]) * checkpoint.psi[index];
+            checkpoint.mu[index] = (checkpoint.psi[index] - parms.g) * checkpoint.psi2[index] - parms.eps * checkpoint.psi[index];
+        }
+    }
+
+    for (int j = 0; j < (LY / 2 + 1); j++)
+    {
+        for (int i = 0; i < LX; i++)
+        {
+            auto index = j * LX + i;
+            checkpoint.d2n_q[index][0] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][0];
+        }
+    }
+
+    fftw_execute_dft_c2r(checkpoint.c2r, reinterpret_cast<fftw_complex *>(checkpoint.d2n_q.data()), checkpoint.psi2.data());
+    checkpoint.fMean = 0;
+    checkpoint.muMean = 0;
+
+    for (int j = 0; j < LY; j++)
+    {
+        for (int i = 0; i < LX; i++)
+        {
+            auto index = j * LX + i;
+            checkpoint.psi2[index] *= parms.scale;
+            checkpoint.f[index] += 0.5 * checkpoint.psi2[index] * checkpoint.psi[index];
+            checkpoint.mu[index] += checkpoint.psi2[index];
+            checkpoint.fMean += checkpoint.f[index] * parms.scale;
+            checkpoint.muMean += checkpoint.mu[index] * parms.scale;
+        }
+    }
+}
+
+void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
+{
+    // calculate non linear term.
+    for (int j = 0; j < LY; j++)
+    {
+        for (int i = 0; i < LX; i++)
+        {
+            auto index = j * LX + i;
+            temps.nonlin1[index] = checkpoint.psi[index] * checkpoint.psi[index] * (checkpoint.psi[index] - parms.g);
+        }
+    }
+
+    // tramsform
+    fftw_execute_dft_r2c(checkpoint.r2c, temps.nonlin1.data(), reinterpret_cast<fftw_complex *>(temps.nonlin1_q.data()));
+}
+
+// File outputs
+void delete_files()
+{
+    // delete f_mu.csv if it exists
+    if (filesystem::exists("f_mu.csv"))
+    {
+        filesystem::remove("f_mu.csv");
+    }
+}
+
+void write_f_mu(pfc_checkpoint &checkpoint)
+{
+    // write f, mu to csv files (append to existing file or create)
+    ofstream out_f_mu("f_mu.csv", ios::app);
+    out_f_mu << checkpoint.t << "," << checkpoint.fMean << "," << checkpoint.muMean << ",";
+    out_f_mu.close();
 }
 
 void psi2png(int l, int m, double *psi, string name)
@@ -418,58 +519,4 @@ void psi2png(int l, int m, double *psi, string name)
     //     }
     // }
     // fpng::write(name.c_str(), l, m, r1a);
-}
-
-void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
-{
-    for (int j = 0; j < LY; j++)
-    {
-        for (int i = 0; i < LX; i++)
-        {
-            auto index = j * LX + i;
-            checkpoint.phi2_1D[index] = checkpoint.psi_1D[index] * checkpoint.psi_1D[index];
-            checkpoint.f[index] = (0.25 * checkpoint.phi2_1D[index] - 0.5 * parms.eps - parms.g * checkpoint.psi_1D[index]) * checkpoint.psi_1D[index];
-            checkpoint.mu[index] = (checkpoint.psi_1D[index] - parms.g) * checkpoint.phi2_1D[index] - parms.eps * checkpoint.psi_1D[index];
-        }
-    }
-
-    for (int j = 0; j < (LY / 2 + 1); j++)
-    {
-        for (int i = 0; i < LX; i++)
-        {
-            auto index = j * LX + i;
-            checkpoint.d2nq_1D[index][0] = (parms.q02 - checkpoint.q2[j][i]) * (parms.q02 - checkpoint.q2[j][i]) * checkpoint.psiq_1D[index][0];
-        }
-    }
-    fftw_execute_dft_c2r(checkpoint.c2r, checkpoint.d2nq_1D, checkpoint.phi2_1D);
-    checkpoint.fMean = 0;
-    checkpoint.muMean = 0;
-    for (int j = 0; j < LY; j++)
-    {
-        for (int i = 0; i < LX; i++)
-        {
-            auto index = j * LX + i;
-            checkpoint.phi2_1D[index] *= parms.scale;
-            checkpoint.f[index] += 0.5 * checkpoint.phi2_1D[index] * checkpoint.psi_1D[index];
-            checkpoint.mu[index] += checkpoint.phi2_1D[index];
-            checkpoint.fMean += checkpoint.f[index] * parms.scale;
-            checkpoint.muMean += checkpoint.mu[index] * parms.scale;
-        }
-    }
-}
-
-void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
-{
-    // calculate non linear term.
-    for (int j = 0; j < LY; j++)
-    {
-        for (int i = 0; i < LX; i++)
-        {
-            auto index = j * LX + i;
-            temps.nonlin1[index] = checkpoint.psi_1D[index] * checkpoint.psi_1D[index] * (checkpoint.psi_1D[index] - parms.g);
-        }
-    }
-
-    // tramsform
-    fftw_execute_dft_r2c(checkpoint.r2c, temps.nonlin1.data(), temps.nonlin1_q.data());
 }
