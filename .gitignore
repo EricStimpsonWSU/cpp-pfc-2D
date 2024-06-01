@@ -3,3 +3,4 @@
 .vscode/launch.json
 .vscode/settings.json
 .vscode/tasks.json
+/fortran_src/
