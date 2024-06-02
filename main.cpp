@@ -3,6 +3,7 @@
 #include <limits>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <complex>
 #include <vector>
 #include <array>
@@ -97,7 +98,7 @@ struct pfc_parms
     int total_time_steps;               // number of time steps (transient and after transient)
     double checkpoint_time;             // time to checkpoint
     int checkpoint_time_steps;          // stpes per checkpoint
-    int nim;                            // number of images
+    int nImages;                        // number of images
     int predictor_corrector_iterations; // number of iterations
     double tol;                         // tolerance for convergence
     double err;                         // error
@@ -165,6 +166,7 @@ void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps
 // File outputs
 void delete_files();
 void write_f_mu(pfc_checkpoint &checkpoint);
+string generateImageFileName(int i, int nImages);
 void psi2png(int l, int m, double *psi, string name);
 
 // Validatations
@@ -202,7 +204,7 @@ void test_pfc_2D()
     init_pfc_checkpoint(parms, checkpoint);
     output_pfc_checkpoint(checkpoint);
 
-    psi2png(LY, LX, checkpoint.psi.data(), "test.png");
+    psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(0, parms.nImages));
     f_mu(parms, checkpoint);
 
     // write fMean, muMean to file
@@ -255,7 +257,8 @@ void test_pfc_2D()
         {
             f_mu(parms, checkpoint);
             write_f_mu(checkpoint);
-            psi2png(LY, LX, checkpoint.psi.data(), "test1.png");
+            auto imageNumber = checkpoint.n == parms.transient_time_steps ? 1 : checkpoint.n / parms.checkpoint_time_steps + 1;
+            psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(imageNumber, parms.nImages));
         }
     }
 
@@ -282,7 +285,7 @@ void init_pfc_parms_thin_film(pfc_parms &parms)
                              static_cast<int>(round((parms.total_time - parms.transient_time) / parms.dt)); // total time steps
     parms.checkpoint_time = 50.;                                                                            // time to checkpoint (image save)
     parms.checkpoint_time_steps = static_cast<int>(round(parms.checkpoint_time / parms.dt));                // time steps between checkpoints
-    parms.nim = static_cast<int>(parms.total_time / parms.checkpoint_time);                                 // number of images
+    parms.nImages = static_cast<int>(parms.total_time / parms.checkpoint_time) + 2;                         // number of images number of checkpoints and one for initial, one for end of transient time.
     parms.predictor_corrector_iterations = 100;                                                             // number of iterations
     parms.tol = 1.0e-3;                                                                                     // tolerance for convergence
     parms.err = parms.tol / 10;                                                                             // error
@@ -314,7 +317,7 @@ void output_pfc_parms(pfc_parms &parms)
     out << "transient_time_steps = " << parms.transient_time_steps << endl;
     out << "total_time = " << parms.total_time << endl;
     out << "checkpoint_time = " << parms.checkpoint_time << endl;
-    out << "nim = " << parms.nim << endl;
+    out << "nImages = " << parms.nImages << endl;
     out << "predictor_corrector_iterations = " << parms.predictor_corrector_iterations << endl;
     out << "tol = " << parms.tol << endl;
     out << "err = " << parms.err << endl;
@@ -817,6 +820,14 @@ void write_f_mu(pfc_checkpoint &checkpoint)
     out_f_mu << setprecision(numeric_limits<double>::max_digits10);
     out_f_mu << checkpoint.time << "," << checkpoint.fMean << "," << checkpoint.muMean << "," << endl;
     out_f_mu.close();
+}
+
+string generateImageFileName(int i, int nImages)
+{
+    ostringstream ss;
+    int numZeros = floor(log10(nImages) + 1);
+    ss << "pfc" << setw(numZeros) << setfill('0') << i << ".png";
+    return ss.str();
 }
 
 void psi2png(int l, int m, double *psi, string name)
