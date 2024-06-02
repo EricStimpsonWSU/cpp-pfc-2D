@@ -9,7 +9,6 @@ set(FPNG_DIR ../extern/fpng/src)
 
 # find the FFTW3 library
 find_library(FFTW_LIB NAMES libfftw3-3 PATHS ${FFTW_DIR} NO_DEFAULT_PATH)
-# find_library(FFTW_LIB libfftw3-3 ${FFTW_DIR})
 
 # specify the directory where fftw3.h can be found
 include_directories(${FFTW_DIR} ${FPNG_DIR})
@@ -18,6 +17,12 @@ add_executable(pfc-2D
     main.cpp
     ${FPNG_DIR}/fpng.h
     ${FPNG_DIR}/fpng.cpp)
+
+target_compile_definitions(pfc-2D PRIVATE _ITERATOR_DEBUG_LEVEL=0)
+
+if(CMAKE_BUILD_TYPE MATCHES Debug)
+    target_compile_definitions(pfc-2D PRIVATE DEBUG)
+endif()
 
 # link the fftw3 library
 target_link_libraries(pfc-2D ${FFTW_LIB})

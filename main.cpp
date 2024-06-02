@@ -27,8 +27,11 @@ using namespace std;
 // with the transient time
 
 // Define only one of the initialization methods
-// #define INIT_HOMO // homogenious initial condition
+#ifdef DEBUG
 #define INIT_FILE // initialize using 0.psi.dat file
+#else
+#define INIT_HOMO // homogenious initial condition
+#endif
 
 // Define as many of the validates as desired
 #define VALID_TOL 1.e-9
@@ -223,12 +226,11 @@ void test_pfc_2D()
         {
             checkpoint.dt = parms.dt;
             checkpoint.time = (checkpoint.n - parms.transient_time_steps) * parms.dt + parms.transient_time;
-            // refactor - this seems completely unnecessary after it's done once
-            for (int i = 0; i < LX; i++)
+
+            if (checkpoint.n == parms.transient_time_steps)
             {
-                for (int j = 0; j < LY / 2 + 1; j++)
+                for (int index = 0; index < LX * (LY / 2 + 1); index++)
                 {
-                    auto index = i * (LY / 2 + 1) + j;
                     auto alpha_1 = -checkpoint.q2[index] * (-parms.eps + (checkpoint.q2[index] - parms.q02) * (checkpoint.q2[index] - parms.q02));
                     auto alpha_dt = alpha_1 * checkpoint.dt;
                     checkpoint.exp_1[index] = exp(alpha_dt);
@@ -246,7 +248,6 @@ void test_pfc_2D()
             }
         }
         sheq(parms, checkpoint, temps);
-        // psi2png(LY, LX, checkpoint.psi.data(), "test1.png");
 
         // calculate free energy
         if (checkpoint.n == parms.transient_time_steps ||
@@ -254,6 +255,7 @@ void test_pfc_2D()
         {
             f_mu(parms, checkpoint);
             write_f_mu(checkpoint);
+            psi2png(LY, LX, checkpoint.psi.data(), "test1.png");
         }
     }
 
@@ -357,21 +359,17 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
     double n0 = -0.02; // n0_sol=-0.042253274 (from 1D ampl. eqs.); note: if setting n0=-0.04, all liquid
     double noise = 0.1;
     double noise0 = noise;
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
+        if (abs(n0) < 1.0e-10)
         {
-            auto index = i * LY + j;
-            if (abs(n0) < 1.0e-10)
-            {
-                // psi[index] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
-                checkpoint.psi[index] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
-            }
-            else
-            {
-                // psi[index] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
-                checkpoint.psi[index] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
-            }
+            // psi[index] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
+            checkpoint.psi[index] = n0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
+        }
+        else
+        {
+            // psi[index] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
+            checkpoint.psi[index] = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
         }
     }
 
@@ -382,25 +380,17 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
     // c2r overwrites input
     fftw_execute(checkpoint.c2r);
 
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            checkpoint.psi[indx] *= parms.scale;
-        }
+        checkpoint.psi[index] *= parms.scale;
     }
 #elif defined(INIT_FILE)
     // initialize psi from "0.psi.dat"
     cout << "initialize psi from '0.psi.dat'" << endl;
     ifstream in("0.psi.dat");
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            in >> checkpoint.psi[index];
-        }
+        in >> checkpoint.psi[index];
     }
 #endif
     fftw_execute_dft_r2c(checkpoint.r2c, checkpoint.psi.data(), reinterpret_cast<fftw_complex *>(checkpoint.psi_q.data()));
@@ -518,15 +508,11 @@ void init_pfc_temps(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &tem
 // PFC algorithms
 void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
 {
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            checkpoint.psi2[index] = checkpoint.psi[index] * checkpoint.psi[index];
-            checkpoint.f[index] = (0.25 * checkpoint.psi2[index] - 0.5 * parms.eps - parms.g * checkpoint.psi[index] / 3) * checkpoint.psi2[index];
-            checkpoint.mu[index] = (checkpoint.psi[index] - parms.g) * checkpoint.psi2[index] - parms.eps * checkpoint.psi[index];
-        }
+        checkpoint.psi2[index] = checkpoint.psi[index] * checkpoint.psi[index];
+        checkpoint.f[index] = (0.25 * checkpoint.psi2[index] - 0.5 * parms.eps - parms.g * checkpoint.psi[index] / 3) * checkpoint.psi2[index];
+        checkpoint.mu[index] = (checkpoint.psi[index] - parms.g) * checkpoint.psi2[index] - parms.eps * checkpoint.psi[index];
     }
 
 #ifdef VALID_PSI2_0
@@ -539,14 +525,10 @@ void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
     validate_real(checkpoint.mu, "0.mu.dat", LX, LY, VALID_TOL);
 #endif
 
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
-        for (int j = 0; j < (LY / 2 + 1); j++)
-        {
-            auto index = i * (LY / 2 + 1) + j;
-            checkpoint.d2n_q[index][0] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][0];
-            checkpoint.d2n_q[index][1] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][1];
-        }
+        checkpoint.d2n_q[index][0] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][0];
+        checkpoint.d2n_q[index][1] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][1];
     }
 
 #ifdef VALID_D2NQ2_0
@@ -559,17 +541,13 @@ void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
     checkpoint.fMean = 0;
     checkpoint.muMean = 0;
 
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            checkpoint.psi2[index] *= parms.scale;
-            checkpoint.f[index] += 0.5 * checkpoint.psi2[index] * checkpoint.psi[index];
-            checkpoint.mu[index] += checkpoint.psi2[index];
-            checkpoint.fMean += checkpoint.f[index] * parms.scale;
-            checkpoint.muMean += checkpoint.mu[index] * parms.scale;
-        }
+        checkpoint.psi2[index] *= parms.scale;
+        checkpoint.f[index] += 0.5 * checkpoint.psi2[index] * checkpoint.psi[index];
+        checkpoint.mu[index] += checkpoint.psi2[index];
+        checkpoint.fMean += checkpoint.f[index] * parms.scale;
+        checkpoint.muMean += checkpoint.mu[index] * parms.scale;
     }
 
 #ifdef VALID_PSI2_POSTC2R_0
@@ -592,19 +570,15 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
     // first step: predictor values of psiq
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
-        for (int j = 0; j < LY / 2 + 1; j++)
-        {
-            auto index = i * (LY / 2 + 1) + j;
-            temps.psi0_q[index][0] = checkpoint.exp_1[index] * checkpoint.psi_q[index][0] + checkpoint.cf_1[index] * temps.nonlin1_q[index][0];
-            temps.psi0_q[index][1] = checkpoint.exp_1[index] * checkpoint.psi_q[index][1] + checkpoint.cf_1[index] * temps.nonlin1_q[index][1];
+        temps.psi0_q[index][0] = checkpoint.exp_1[index] * checkpoint.psi_q[index][0] + checkpoint.cf_1[index] * temps.nonlin1_q[index][0];
+        temps.psi0_q[index][1] = checkpoint.exp_1[index] * checkpoint.psi_q[index][1] + checkpoint.cf_1[index] * temps.nonlin1_q[index][1];
 
-            if (parms.predictor_corrector_iterations > 0)
-            {
-                temps.psi0_sign_q[index][0] = -checkpoint.cf2_1[index] * temps.nonlin1_q[index][0];
-                temps.psi0_sign_q[index][1] = -checkpoint.cf2_1[index] * temps.nonlin1_q[index][1];
-            }
+        if (parms.predictor_corrector_iterations > 0)
+        {
+            temps.psi0_sign_q[index][0] = -checkpoint.cf2_1[index] * temps.nonlin1_q[index][0];
+            temps.psi0_sign_q[index][1] = -checkpoint.cf2_1[index] * temps.nonlin1_q[index][1];
         }
     }
 #ifdef VALID_PSI0Q_PRECONJ_1
@@ -628,14 +602,10 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
     // copy temps.psi0_q to temps.psi0_tmp_q
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
-        for (int j = 0; j < LY / 2 + 1; j++)
-        {
-            auto index = i * (LY / 2 + 1) + j;
-            temps.psi0_tmp_q[index][0] = temps.psi0_q[index][0];
-            temps.psi0_tmp_q[index][1] = temps.psi0_q[index][1];
-        }
+        temps.psi0_tmp_q[index][0] = temps.psi0_q[index][0];
+        temps.psi0_tmp_q[index][1] = temps.psi0_q[index][1];
     }
 #ifdef VALID_PSI_1
     validate_complex(temps.psi0_tmp_q, "1.psi0q.dat", LX, LY / 2 + 1, VALID_TOL);
@@ -646,28 +616,20 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
     fftw_execute_dft_c2r(checkpoint.c2r, reinterpret_cast<fftw_complex *>(temps.psi0_tmp_q.data()), temps.psi0.data());
 
     // scale & copy back
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            temps.psi0[index] *= parms.scale;
-            checkpoint.psi[index] = temps.psi0[index];
-        }
+        temps.psi0[index] *= parms.scale;
+        checkpoint.psi[index] = temps.psi0[index];
     }
 #ifdef VALID_PSI_1
     validate_real(checkpoint.psi, "1.psi.dat", LX, LY, VALID_TOL);
 #endif
 
     // copy temps.psi0_q to checkpoint.psi_q
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
-        for (int j = 0; j < LY / 2 + 1; j++)
-        {
-            auto index = i * (LY / 2 + 1) + j;
-            checkpoint.psi_q[index][0] = temps.psi0_q[index][0];
-            checkpoint.psi_q[index][1] = temps.psi0_q[index][1];
-        }
+        checkpoint.psi_q[index][0] = temps.psi0_q[index][0];
+        checkpoint.psi_q[index][1] = temps.psi0_q[index][1];
     }
 #ifdef VALID_PSI_1
     validate_complex(checkpoint.psi_q, "1.psiq.dat", LX, LY / 2 + 1, VALID_TOL);
@@ -676,14 +638,10 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
     // Second step: corrector
     if (parms.predictor_corrector_iterations > 0)
     {
-        for (int i = 0; i < LX; i++)
+        for (int index = 0; index < LX * (LY / 2 + 1); index++)
         {
-            for (int j = 0; j < LY / 2 + 1; j++)
-            {
-                auto index = i * (LY / 2 + 1) + j;
-                temps.psi0_q[index][0] += temps.psi0_sign_q[index][0];
-                temps.psi0_q[index][1] += temps.psi0_sign_q[index][1];
-            }
+            temps.psi0_q[index][0] += temps.psi0_sign_q[index][0];
+            temps.psi0_q[index][1] += temps.psi0_sign_q[index][1];
         }
 
 #ifdef VALID_PSI0Q_1_1
@@ -705,14 +663,10 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
             // refactor : could I be working with temps.psi0_q?
-            for (int i = 0; i < LX; i++)
+            for (int index = 0; index < LX * (LY / 2 + 1); index++)
             {
-                for (int j = 0; j < LY / 2 + 1; j++)
-                {
-                    auto index = i * (LY / 2 + 1) + j;
-                    checkpoint.psi_q[index][0] = temps.psi0_q[index][0] + checkpoint.cf2_1[index] * temps.nonlin1_q[index][0];
-                    checkpoint.psi_q[index][1] = temps.psi0_q[index][1] + checkpoint.cf2_1[index] * temps.nonlin1_q[index][1];
-                }
+                checkpoint.psi_q[index][0] = temps.psi0_q[index][0] + checkpoint.cf2_1[index] * temps.nonlin1_q[index][0];
+                checkpoint.psi_q[index][1] = temps.psi0_q[index][1] + checkpoint.cf2_1[index] * temps.nonlin1_q[index][1];
             }
 
             // set the first half of first row of temps.psi0_q to complex conjugate of the second half
@@ -725,14 +679,10 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             }
 
             // copy checkpoint.psi_q to temps.psi0_tmp_q
-            for (int i = 0; i < LX; i++)
+            for (int index = 0; index < LX * (LY / 2 + 1); index++)
             {
-                for (int j = 0; j < LY / 2 + 1; j++)
-                {
-                    auto index = i * (LY / 2 + 1) + j;
-                    temps.psi0_tmp_q[index][0] = checkpoint.psi_q[index][0];
-                    temps.psi0_tmp_q[index][1] = checkpoint.psi_q[index][1];
-                }
+                temps.psi0_tmp_q[index][0] = checkpoint.psi_q[index][0];
+                temps.psi0_tmp_q[index][1] = checkpoint.psi_q[index][1];
             }
 
 #ifdef VALID_PSIQ_1_2
@@ -750,13 +700,9 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             fftw_execute_dft_c2r(checkpoint.c2r, reinterpret_cast<fftw_complex *>(temps.psi0_tmp_q.data()), checkpoint.psi.data());
 
             // scale
-            for (int i = 0; i < LX; i++)
+            for (int index = 0; index < LX * LY; index++)
             {
-                for (int j = 0; j < LY; j++)
-                {
-                    auto index = i * LY + j;
-                    checkpoint.psi[index] *= parms.scale;
-                }
+                checkpoint.psi[index] *= parms.scale;
             }
 
 #ifdef VALID_PSI_1_2
@@ -774,32 +720,28 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             if (iCorr > 0)
             {
                 auto max_conv_psi = 0.;
-                for (int i = 0; i < LX; i++)
+                for (int index = 0; index < LX * LY; index++)
                 {
-                    for (int j = 0; j < LY; j++)
+                    auto abs_psi = abs(checkpoint.psi[index]);
+                    auto conv = 0.;
+                    if (abs_psi > 1.e5)
                     {
-                        auto index = i * LY + j;
-                        auto abs_psi = abs(checkpoint.psi[index]);
-                        auto conv = 0.;
-                        if (abs_psi > 1.e5)
-                        {
-                            cout << "psi diverges at t=" << checkpoint.time << ", iter=" << checkpoint.n << ", iCorr=" << iCorr << endl;
-                            cout << "j=" << j << ", i=" << i << ", psi(j,i)=" << checkpoint.psi[index] << endl;
-                            // throw exception
-                            throw;
-                        }
-                        if (abs_psi > parms.err)
-                        {
-                            conv = abs(checkpoint.psi[index] - temps.psi0[index]);
-                        }
-                        else
-                        {
-                            conv = abs(checkpoint.psi[index] - temps.psi0[index]) / abs_psi;
-                        }
-                        if (conv > max_conv_psi)
-                        {
-                            max_conv_psi = conv;
-                        }
+                        cout << "psi diverges at t=" << checkpoint.time << ", iter=" << checkpoint.n << ", iCorr=" << iCorr << endl;
+                        cout << "i=" << index % LY << ", j=" << static_cast<int>(index / LY) << ", psi(j,i)=" << checkpoint.psi[index] << endl;
+                        // throw exception
+                        throw;
+                    }
+                    if (abs_psi > parms.err)
+                    {
+                        conv = abs(checkpoint.psi[index] - temps.psi0[index]);
+                    }
+                    else
+                    {
+                        conv = abs(checkpoint.psi[index] - temps.psi0[index]) / abs_psi;
+                    }
+                    if (conv > max_conv_psi)
+                    {
+                        max_conv_psi = conv;
                     }
                 }
 
@@ -809,19 +751,14 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
                 }
             }
 
-            for (int i = 0; i < LX; i++)
+            for (int index = 0; index < LX * LY; index++)
             {
-                for (int j = 0; j < LY; j++)
-                {
-                    auto index = i * LY + j;
-                    temps.psi0[index] = checkpoint.psi[index];
-                }
+                temps.psi0[index] = checkpoint.psi[index];
             }
         }
 
         if (parms.predictor_corrector_iterations > 0)
         {
-
             // should have converged...
             // write non-convergence to file
             ofstream out_nc("non_convergence.txt", ios::app);
@@ -830,17 +767,13 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             auto min_psi = 999.;
             auto max_psi = -999.;
             auto max_conv_psi = 0.;
-            for (int i = 0; i < LX; i++)
+            for (int index = 0; index < LX * LY; index++)
             {
-                for (int j = 0; j < LY; j++)
-                {
-                    auto index = i * LY + j;
-                    auto psi = checkpoint.psi[index];
-                    auto abs_psi = abs(psi);
-                    min_psi = (min_psi < psi) ? min_psi : psi;
-                    max_psi = (max_psi > psi) ? max_psi : psi;
-                    max_conv_psi = (max_conv_psi > abs_psi) ? max_conv_psi : abs_psi;
-                }
+                auto psi = checkpoint.psi[index];
+                auto abs_psi = abs(psi);
+                min_psi = (min_psi < psi) ? min_psi : psi;
+                max_psi = (max_psi > psi) ? max_psi : psi;
+                max_conv_psi = (max_conv_psi > abs_psi) ? max_conv_psi : abs_psi;
             }
             out_nc << "max_conv_psi=" << max_conv_psi << ", range=(" << min_psi << ", " << max_psi << ")" << endl
                    << endl;
@@ -852,26 +785,18 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 {
     // calculate non linear term.
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * LY; index++)
     {
-        for (int j = 0; j < LY; j++)
-        {
-            auto index = i * LY + j;
-            temps.nonlin1[index] = checkpoint.psi[index] * checkpoint.psi[index] * (checkpoint.psi[index] - parms.g);
-        }
+        temps.nonlin1[index] = checkpoint.psi[index] * checkpoint.psi[index] * (checkpoint.psi[index] - parms.g);
     }
 
     // tramsform
     fftw_execute_dft_r2c(checkpoint.r2c, temps.nonlin1.data(), reinterpret_cast<fftw_complex *>(temps.nonlin1_q.data()));
 
-    for (int i = 0; i < LX; i++)
+    for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
-        for (int j = 0; j < LY / 2 + 1; j++)
-        {
-            auto index = i * (LY / 2 + 1) + j;
-            temps.nonlin1_q[index][0] *= -checkpoint.q2[index];
-            temps.nonlin1_q[index][1] *= -checkpoint.q2[index];
-        }
+        temps.nonlin1_q[index][0] *= -checkpoint.q2[index];
+        temps.nonlin1_q[index][1] *= -checkpoint.q2[index];
     }
 }
 
@@ -912,10 +837,6 @@ void psi2png(int l, int m, double *psi, string name)
     // get the min and max values of r1a
     double min = *min_element(r1a.begin(), r1a.end());
     double max = *max_element(r1a.begin(), r1a.end());
-
-    // use max precision for doubles on output
-    cout << setprecision(numeric_limits<double>::max_digits10);
-    cout << "min = " << min << ", max = " << max << ", range = " << max - min << endl;
 
     // scale r1a to [0,1]
     for (int i = 0; i < l; i++)
