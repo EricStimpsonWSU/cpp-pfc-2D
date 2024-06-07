@@ -13,6 +13,9 @@ find_library(FFTW_LIB NAMES libfftw3-3 PATHS ${FFTW_DIR} NO_DEFAULT_PATH)
 # specify the directory where fftw3.h can be found
 include_directories(${FFTW_DIR} ${FPNG_DIR})
 
+# find OpenMP
+find_package(OpenMP REQUIRED)
+
 add_executable(pfc-2D
     main.cpp
     ${FPNG_DIR}/fpng.h
@@ -26,6 +29,11 @@ endif()
 
 # link the fftw3 library
 target_link_libraries(pfc-2D ${FFTW_LIB})
+
+# link OpenMP
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(pfc-2D OpenMP::OpenMP_CXX)
+endif()
 
 # On Windows, copy the fftw3 dll to the output directory [not working, copied manually]
 # if(WIN32)

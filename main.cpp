@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <fftw3.h>
 #include <fpng.h>
+#include <omp.h>
 
 using namespace std;
 
@@ -31,7 +32,11 @@ using namespace std;
 #ifdef DEBUG
 #define INIT_FILE // initialize using 0.psi.dat file
 #else
-#define INIT_HOMO // homogenious initial condition
+// #define INIT_STRIPES
+// #define INIT_HOMO // homogenious initial condition
+#define INIT_ONEMODE
+
+#define USE_OPTIMAL_DX_DY
 #endif
 
 // Define as many of the validates as desired
@@ -69,15 +74,18 @@ using namespace std;
 
 // #define NOISE_DYNAMICS // dynamics with conserved Gaussian noise (nabla dot zeta, i.e. div[zeta])
 #define SAVE_CONF
+
+#define WRITE_MAGES 1
 #define image_reverse // x,y reverse for image output (default)
 
-const int LX = 128; // Array dimensions
-const int LY = 128;
+const int LX = 52; // Array dimensions
+const int LY = 45;
 
 const int N = 2048;
 const double PI = 3.141592653589793238460;
 const double L = 2.0 * PI;
-const double dx = L / N;
+const double DX_OPTIMAL = 0.837238843353547;
+const double DY_OPTIMAL = 0.837873356328059;
 
 // define a structure for pfc model parameters
 struct pfc_parms
@@ -109,6 +117,10 @@ struct pfc_parms
     double g;                           // g
     double scale;                       // scale for backward FFT
     int seed;                           // seed for random number generator
+    int nx;
+    int ny;
+    double deltaDx = 0.;
+    double deltaDy = 0.;
 };
 
 // define a structure for pfc model checkpoint
@@ -149,6 +161,7 @@ struct pfc_temps
 // prototypes
 // tests
 void test_pfc_2D();
+void min_2D();
 
 // PFC initialization / cleanup
 void init_pfc_parms_thin_film(pfc_parms &parms);
@@ -166,8 +179,9 @@ void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps
 // File outputs
 void delete_files();
 void write_f_mu(pfc_checkpoint &checkpoint);
+void write_min_f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint);
 string generateImageFileName(int i, int nImages);
-void psi2png(int l, int m, double *psi, string name);
+void psi2png(int height, int width, double *psi, string name);
 
 // Validatations
 void validate_real(const vector<double> &checkArray, const string &filename, int LX, int LY, double tol);
@@ -180,6 +194,7 @@ int main(int argc, char const *argv[])
 
     // conduct tests
     test_pfc_2D();
+    // min_2D();
 
     cout << "Goodbye World!" << endl;
     return 0;
@@ -204,7 +219,8 @@ void test_pfc_2D()
     init_pfc_checkpoint(parms, checkpoint);
     output_pfc_checkpoint(checkpoint);
 
-    psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(0, parms.nImages));
+    if (WRITE_MAGES > 0)
+        psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(0, parms.nImages));
     f_mu(parms, checkpoint);
 
     // write fMean, muMean to file
@@ -257,12 +273,179 @@ void test_pfc_2D()
         {
             f_mu(parms, checkpoint);
             write_f_mu(checkpoint);
-            auto imageNumber = checkpoint.n == parms.transient_time_steps ? 1 : checkpoint.n / parms.checkpoint_time_steps + 1;
-            psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(imageNumber, parms.nImages));
+            if (WRITE_MAGES > 0)
+            {
+                auto imageNumber = checkpoint.n == parms.transient_time_steps ? 1 : checkpoint.n / parms.checkpoint_time_steps + 1;
+                psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(imageNumber, parms.nImages));
+            }
         }
     }
 
     free_pfc_checkpoint(checkpoint);
+}
+
+void min_2D()
+{
+    // delete files
+    delete_files();
+
+#ifdef NOISE_DYNAMICS
+    complex **zeta_nq; // 2D Gaussian noise
+#endif
+    // parameters for film (unstrained, bulk)
+    pfc_parms parms;
+    init_pfc_parms_thin_film(parms);
+    output_pfc_parms(parms);
+
+    for (int i = -5; i <= 5; i++)
+    {
+        parms.deltaDx = 0.005 * i;
+        parms.deltaDy = 0.;
+
+        // initialize checkpoint
+        pfc_checkpoint checkpoint;
+        init_pfc_checkpoint(parms, checkpoint);
+        output_pfc_checkpoint(checkpoint);
+
+        if (WRITE_MAGES > 0)
+            psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(0, parms.nImages));
+        f_mu(parms, checkpoint);
+
+        // write fMean, muMean to file
+        write_f_mu(checkpoint);
+
+        // initialize temps
+        pfc_temps temps;
+        init_pfc_temps(parms, checkpoint, temps);
+
+        // PFC time loop (running)
+        while (checkpoint.n < parms.total_time_steps)
+        {
+            checkpoint.n++;
+            // if time is less than transient time, use transient time step, otherwise standard time step
+            if (checkpoint.n < parms.transient_time_steps)
+            {
+                checkpoint.dt = parms.transient_dt;
+                checkpoint.time = checkpoint.n * parms.transient_dt;
+            }
+            else
+            {
+                checkpoint.dt = parms.dt;
+                checkpoint.time = (checkpoint.n - parms.transient_time_steps) * parms.dt + parms.transient_time;
+
+                if (checkpoint.n == parms.transient_time_steps)
+                {
+                    for (int index = 0; index < LX * (LY / 2 + 1); index++)
+                    {
+                        auto alpha_1 = -checkpoint.q2[index] * (-parms.eps + (checkpoint.q2[index] - parms.q02) * (checkpoint.q2[index] - parms.q02));
+                        auto alpha_dt = alpha_1 * checkpoint.dt;
+                        checkpoint.exp_1[index] = exp(alpha_dt);
+                        if (abs(alpha_dt) < 2.0e-5)
+                        {
+                            checkpoint.cf_1[index] = checkpoint.dt * (1.0 + 0.5 * alpha_dt * (1.0 + alpha_dt / 3.0));
+                            checkpoint.cf2_1[index] = 0.5 * checkpoint.dt * (1.0 + alpha_dt * (1.0 + 0.250 * alpha_dt) / 3.0);
+                        }
+                        else
+                        {
+                            checkpoint.cf_1[index] = (checkpoint.exp_1[index] - 1) / alpha_1;
+                            checkpoint.cf2_1[index] = (checkpoint.exp_1[index] - (1 + alpha_dt)) / (alpha_1 * alpha_dt);
+                        }
+                    }
+                }
+            }
+            sheq(parms, checkpoint, temps);
+
+            // calculate free energy
+            if (checkpoint.n == parms.transient_time_steps ||
+                ((checkpoint.n > parms.transient_time_steps) && ((checkpoint.n + static_cast<int>(parms.transient_time / parms.dt)) % parms.checkpoint_time_steps == 0)))
+            {
+                f_mu(parms, checkpoint);
+                write_f_mu(checkpoint);
+                if (WRITE_MAGES > 0)
+                {
+                    auto imageNumber = checkpoint.n == parms.transient_time_steps ? 1 : checkpoint.n / parms.checkpoint_time_steps + 1;
+                    psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(imageNumber, parms.nImages));
+                }
+            }
+        }
+        write_min_f_mu(parms, checkpoint);
+        free_pfc_checkpoint(checkpoint);
+    }
+
+    for (int i = -5; i <= 5; i++)
+    {
+        parms.deltaDx = 0.;
+        parms.deltaDy = 0.005 * i;
+
+        // initialize checkpoint
+        pfc_checkpoint checkpoint;
+        init_pfc_checkpoint(parms, checkpoint);
+        output_pfc_checkpoint(checkpoint);
+
+        if (WRITE_MAGES > 0)
+            psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(0, parms.nImages));
+        f_mu(parms, checkpoint);
+
+        // write fMean, muMean to file
+        write_f_mu(checkpoint);
+
+        // initialize temps
+        pfc_temps temps;
+        init_pfc_temps(parms, checkpoint, temps);
+
+        // PFC time loop (running)
+        while (checkpoint.n < parms.total_time_steps)
+        {
+            checkpoint.n++;
+            // if time is less than transient time, use transient time step, otherwise standard time step
+            if (checkpoint.n < parms.transient_time_steps)
+            {
+                checkpoint.dt = parms.transient_dt;
+                checkpoint.time = checkpoint.n * parms.transient_dt;
+            }
+            else
+            {
+                checkpoint.dt = parms.dt;
+                checkpoint.time = (checkpoint.n - parms.transient_time_steps) * parms.dt + parms.transient_time;
+
+                if (checkpoint.n == parms.transient_time_steps)
+                {
+                    for (int index = 0; index < LX * (LY / 2 + 1); index++)
+                    {
+                        auto alpha_1 = -checkpoint.q2[index] * (-parms.eps + (checkpoint.q2[index] - parms.q02) * (checkpoint.q2[index] - parms.q02));
+                        auto alpha_dt = alpha_1 * checkpoint.dt;
+                        checkpoint.exp_1[index] = exp(alpha_dt);
+                        if (abs(alpha_dt) < 2.0e-5)
+                        {
+                            checkpoint.cf_1[index] = checkpoint.dt * (1.0 + 0.5 * alpha_dt * (1.0 + alpha_dt / 3.0));
+                            checkpoint.cf2_1[index] = 0.5 * checkpoint.dt * (1.0 + alpha_dt * (1.0 + 0.250 * alpha_dt) / 3.0);
+                        }
+                        else
+                        {
+                            checkpoint.cf_1[index] = (checkpoint.exp_1[index] - 1) / alpha_1;
+                            checkpoint.cf2_1[index] = (checkpoint.exp_1[index] - (1 + alpha_dt)) / (alpha_1 * alpha_dt);
+                        }
+                    }
+                }
+            }
+            sheq(parms, checkpoint, temps);
+
+            // calculate free energy
+            if (checkpoint.n == parms.transient_time_steps ||
+                ((checkpoint.n > parms.transient_time_steps) && ((checkpoint.n + static_cast<int>(parms.transient_time / parms.dt)) % parms.checkpoint_time_steps == 0)))
+            {
+                f_mu(parms, checkpoint);
+                write_f_mu(checkpoint);
+                if (WRITE_MAGES > 0)
+                {
+                    auto imageNumber = checkpoint.n == parms.transient_time_steps ? 1 : checkpoint.n / parms.checkpoint_time_steps + 1;
+                    psi2png(LY, LX, checkpoint.psi.data(), generateImageFileName(imageNumber, parms.nImages));
+                }
+            }
+        }
+        write_min_f_mu(parms, checkpoint);
+        free_pfc_checkpoint(checkpoint);
+    }
 }
 
 // PFC initialization / cleanup
@@ -274,12 +457,12 @@ void init_pfc_parms_thin_film(pfc_parms &parms)
     parms.qy0 = parms.q0;
     parms.n_dx = 8;                                                                                  // number of grid points per lattice period
     parms.m0_x = LX / parms.n_dx;                                                                    // number of lattice periods along x
-    parms.dx = 2 * PI / (parms.n_dx * parms.qy0);                                                    // discretization of space
-    parms.dy = parms.dx;                                                                             // discretization of space
+    parms.dx = 1.15 * 2 * PI / (parms.n_dx * parms.qy0);                                             // discretization of space
+    parms.dy = 1. * parms.dx;                                                                        // discretization of space
     parms.transient_time = 1.;                                                                       // transient time (seconds)
     parms.transient_dt = 0.01;                                                                       // time step (seconds)
     parms.transient_time_steps = static_cast<int>(round(parms.transient_time / parms.transient_dt)); // number of transient time steps
-    parms.total_time = 10000.;                                                                       // total run time
+    parms.total_time = 1500.;                                                                        // 10000.;                                                                       // total run time
     parms.dt = 0.5;                                                                                  // time step (seconds)
     parms.total_time_steps = parms.transient_time_steps +
                              static_cast<int>(round((parms.total_time - parms.transient_time) / parms.dt)); // total time steps
@@ -296,6 +479,9 @@ void init_pfc_parms_thin_film(pfc_parms &parms)
     parms.g = 0.5 * sqrt(3 / parms.b_s);                                                                    // g
     parms.scale = 1. / (LX * LY);                                                                           // inverse FFT scale
     parms.seed = static_cast<int>(time(0));                                                                 // seed for random number generator
+    // parms.seed = rand();
+    parms.nx = 15;
+    parms.ny = 16;
 }
 
 void output_pfc_parms(pfc_parms &parms)
@@ -387,6 +573,88 @@ void init_pfc_checkpoint(pfc_parms &parms, pfc_checkpoint &checkpoint)
     {
         checkpoint.psi[index] *= parms.scale;
     }
+#elif defined(INIT_STRIPES)
+    // initialize psi with noisy stripes
+    double n0 = -0.02; // n0_sol=-0.042253274 (from 1D ampl. eqs.); note: if setting n0=-0.04, all liquid
+    double noise = 0.1;
+    double noise0 = noise * 0.9;
+    for (int j = 0; j < LY; j++)
+    {
+        auto psi0 = n0 + noise * ((double)rand() / RAND_MAX - 0.5);
+        for (int i = 0; i < LX; i++)
+        {
+            auto index = i * LY + j;
+            checkpoint.psi[index] = psi0 + noise0 * ((double)rand() / RAND_MAX - 0.5);
+        }
+    }
+
+    // get initial psiq
+    fftw_execute(checkpoint.r2c);
+    checkpoint.psi_q[0][0] = n0 * LX * LY; // set the zero mode to n0 so that <psi>=n0
+    checkpoint.psi_q[0][1] = 0.0;
+    // c2r overwrites input
+    fftw_execute(checkpoint.c2r);
+
+    for (int index = 0; index < LX * LY; index++)
+    {
+        checkpoint.psi[index] *= parms.scale;
+    }
+
+#elif defined(INIT_ONEMODE)
+    // initialize psi with noisy stripes
+    // double n0 = -0.02; // n0_sol=-0.042253274 (from 1D ampl. eqs.); note: if setting n0=-0.04, all liquid
+    // double scale = 0.1 / 9;
+    // double offset = -6;
+    // auto q = LY * 1.;
+    // for (int yI = 0; yI < LY; yI++)
+    // {
+    //     for (int xI = 0; xI < LX; xI++)
+    //     {
+    //         auto index = xI * LY + yI;
+    //         checkpoint.psi[index] = n0 + scale * (2 * (2 * cos(sqrt(3) / 2 * q * xI / LX) * cos(1. * LY / LX * q * yI / 2 / LY) + cos(1. * LY / LX * q * yI / LY)) + offset);
+    //     }
+    // }
+
+    double n0 = -0.02; // n0_sol=-0.042253274 (from 1D ampl. eqs.); note: if setting n0=-0.04, all liquid
+    double scale = 0.1 / 9;
+    double offset = -6;
+
+    auto nx = 6;
+    auto ny = 6;
+    auto qx = 4. * PI * nx / sqrt(3);
+    auto qy = 2. * PI * ny;
+
+    for (int yI = 0; yI < LY; yI++)
+    {
+        for (int xI = 0; xI < LX; xI++)
+        {
+            auto index = xI * LY + yI;
+            checkpoint.psi[index] = n0 + scale * (2 * (2 * cos(sqrt(3) / 2 * qx * xI / LX) * cos(0.5 * qy * yI / LY) + cos(qy * yI / LY)) + offset);
+        }
+    }
+
+    // get initial psiq
+    fftw_execute(checkpoint.r2c);
+    checkpoint.psi_q[0][0] = n0 * LX * LY; // set the zero mode to n0 so that <psi>=n0
+    checkpoint.psi_q[0][1] = 0.0;
+    // c2r overwrites input
+    fftw_execute(checkpoint.c2r);
+
+    for (int index = 0; index < LX * LY; index++)
+    {
+        checkpoint.psi[index] *= parms.scale;
+    }
+
+#ifdef USE_OPTIMAL_DX_DY
+    parms.dx = DX_OPTIMAL;
+    parms.dy = DY_OPTIMAL;
+#elif
+    parms.dx = 4. * PI / sqrt(3) * nx / LX + parms.deltaDx;
+    parms.dy = 2. * PI * ny / LY + parms.deltaDy;
+#endif
+    cout << "dx = " << parms.dx << endl;
+    cout << "dy = " << parms.dy << endl;
+
 #elif defined(INIT_FILE)
     // initialize psi from "0.psi.dat"
     cout << "initialize psi from '0.psi.dat'" << endl;
@@ -511,6 +779,7 @@ void init_pfc_temps(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &tem
 // PFC algorithms
 void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
 {
+#pragma omp parallel for
     for (int index = 0; index < LX * LY; index++)
     {
         checkpoint.psi2[index] = checkpoint.psi[index] * checkpoint.psi[index];
@@ -528,6 +797,7 @@ void f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
     validate_real(checkpoint.mu, "0.mu.dat", LX, LY, VALID_TOL);
 #endif
 
+#pragma omp parallel for
     for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
         checkpoint.d2n_q[index][0] = (parms.q02 - checkpoint.q2[index]) * (parms.q02 - checkpoint.q2[index]) * checkpoint.psi_q[index][0];
@@ -573,6 +843,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
     // first step: predictor values of psiq
+#pragma omp parallel for
     for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
         temps.psi0_q[index][0] = checkpoint.exp_1[index] * checkpoint.psi_q[index][0] + checkpoint.cf_1[index] * temps.nonlin1_q[index][0];
@@ -605,6 +876,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
     // copy temps.psi0_q to temps.psi0_tmp_q
+#pragma omp parallel for
     for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
         temps.psi0_tmp_q[index][0] = temps.psi0_q[index][0];
@@ -619,6 +891,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
     fftw_execute_dft_c2r(checkpoint.c2r, reinterpret_cast<fftw_complex *>(temps.psi0_tmp_q.data()), temps.psi0.data());
 
     // scale & copy back
+#pragma omp parallel for
     for (int index = 0; index < LX * LY; index++)
     {
         temps.psi0[index] *= parms.scale;
@@ -629,6 +902,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 #endif
 
     // copy temps.psi0_q to checkpoint.psi_q
+#pragma omp parallel for
     for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
         checkpoint.psi_q[index][0] = temps.psi0_q[index][0];
@@ -641,6 +915,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
     // Second step: corrector
     if (parms.predictor_corrector_iterations > 0)
     {
+#pragma omp parallel for
         for (int index = 0; index < LX * (LY / 2 + 1); index++)
         {
             temps.psi0_q[index][0] += temps.psi0_sign_q[index][0];
@@ -682,6 +957,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             }
 
             // copy checkpoint.psi_q to temps.psi0_tmp_q
+#pragma omp parallel for
             for (int index = 0; index < LX * (LY / 2 + 1); index++)
             {
                 temps.psi0_tmp_q[index][0] = checkpoint.psi_q[index][0];
@@ -703,6 +979,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
             fftw_execute_dft_c2r(checkpoint.c2r, reinterpret_cast<fftw_complex *>(temps.psi0_tmp_q.data()), checkpoint.psi.data());
 
             // scale
+#pragma omp parallel for
             for (int index = 0; index < LX * LY; index++)
             {
                 checkpoint.psi[index] *= parms.scale;
@@ -788,6 +1065,7 @@ void sheq(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps)
 {
     // calculate non linear term.
+#pragma omp parallel for
     for (int index = 0; index < LX * LY; index++)
     {
         temps.nonlin1[index] = checkpoint.psi[index] * checkpoint.psi[index] * (checkpoint.psi[index] - parms.g);
@@ -796,6 +1074,7 @@ void nonlin1_calc(pfc_parms &parms, pfc_checkpoint &checkpoint, pfc_temps &temps
     // tramsform
     fftw_execute_dft_r2c(checkpoint.r2c, temps.nonlin1.data(), reinterpret_cast<fftw_complex *>(temps.nonlin1_q.data()));
 
+#pragma omp parallel for
     for (int index = 0; index < LX * (LY / 2 + 1); index++)
     {
         temps.nonlin1_q[index][0] *= -checkpoint.q2[index];
@@ -822,6 +1101,15 @@ void write_f_mu(pfc_checkpoint &checkpoint)
     out_f_mu.close();
 }
 
+void write_min_f_mu(pfc_parms &parms, pfc_checkpoint &checkpoint)
+{
+    // write f, mu to csv files (append to existing file or create)
+    ofstream out_f_mu("f_mu_min.csv", ios::app);
+    out_f_mu << setprecision(numeric_limits<double>::max_digits10);
+    out_f_mu << parms.dx << "," << parms.dy << "," << checkpoint.time << "," << checkpoint.fMean << "," << checkpoint.muMean << "," << endl;
+    out_f_mu.close();
+}
+
 string generateImageFileName(int i, int nImages)
 {
     ostringstream ss;
@@ -830,19 +1118,16 @@ string generateImageFileName(int i, int nImages)
     return ss.str();
 }
 
-void psi2png(int l, int m, double *psi, string name)
+void psi2png(int height, int width, double *psi, string name)
 {
     // create a PNG image
-    vector<uint8_t> image(l * m * 3);
+    vector<uint8_t> image(height * width * 3);
 
     // copy r1a to vector<double>
-    vector<double> r1a(l * m);
-    for (int i = 0; i < l; i++)
+    vector<double> r1a(height * width);
+    for (int index = 0; index < width * height; index++)
     {
-        for (int j = 0; j < m; j++)
-        {
-            r1a[i * m + j] = psi[i * m + j];
-        }
+        r1a[index] = psi[index];
     }
 
     // get the min and max values of r1a
@@ -850,34 +1135,31 @@ void psi2png(int l, int m, double *psi, string name)
     double max = *max_element(r1a.begin(), r1a.end());
 
     // scale r1a to [0,1]
-    for (int i = 0; i < l; i++)
+    for (int index = 0; index < width * height; index++)
     {
-        for (int j = 0; j < m; j++)
+        if (max - min < 1.0e-10)
         {
-            if (max - min < 1.0e-10)
-            {
-                r1a[i * m + j] = 0.0;
-            }
-            else
-            {
-                r1a[i * m + j] = (r1a[i * m + j] - min) / (max - min);
-            }
+            r1a[index] = 0.0;
+        }
+        else
+        {
+            r1a[index] = (r1a[index] - min) / (max - min);
         }
     }
 
     // copy r1a to image
-    for (int i = 0; i < l; i++)
+    for (int y = 0; y < height; y++)
     {
-        for (int j = 0; j < m; j++)
+        for (int x = 0; x < width; x++)
         {
-            int idx = 3 * (i * m + j);
-            image[idx] = static_cast<uint8_t>(r1a[i * m + j] * 255);
-            image[idx + 1] = static_cast<uint8_t>(r1a[i * m + j] * 255);
-            image[idx + 2] = static_cast<uint8_t>(r1a[i * m + j] * 255);
+            int idx = 3 * (y * width + x);
+            image[idx] = static_cast<uint8_t>(r1a[x * height + y] * 255);
+            image[idx + 1] = static_cast<uint8_t>(r1a[x * height + y] * 255);
+            image[idx + 2] = static_cast<uint8_t>(r1a[x * height + y] * 255);
         }
     }
 
-    fpng::fpng_encode_image_to_file(name.c_str(), image.data(), l, m, 3, 0);
+    fpng::fpng_encode_image_to_file(name.c_str(), image.data(), width, height, 3, 0);
 }
 
 // Validatations
